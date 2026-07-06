@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- No JavaScript: the dashboard refreshes automatically every 3 seconds. -->
+  <meta http-equiv="refresh" content="3">
+
+  <title>Supreme Fan IoT Monitor</title>
+
+  <style>
+    #page {
+      min-height: 100vh;
+      margin: 0;
+      padding: 24px 16px;
+      background: #090d10;
+      color: #8cff98;
+      font-family: "Courier New", Courier, monospace;
+      box-sizing: border-box;
+    }
+
+    #dashboard {
+      width: min(1100px, 100%);
+      margin: 0 auto;
+    }
+
+    #header {
+      padding: 20px;
+      border: 1px solid #36e36f;
+      background: #0d1517;
+      box-shadow: 0 0 18px rgba(54, 227, 111, 0.12);
+    }
+
+    #title {
+      margin: 0;
+      color: #b8ffc0;
+      font-size: clamp(1.25rem, 3vw, 2rem);
+      letter-spacing: 2px;
+    }
+
+    #subtitle {
+      margin: 8px 0 0;
+      color: #5fbd78;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    #connection-line {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px dashed #256d3b;
+      font-size: 0.9rem;
+    }
+
+    #status-online {
+      color: #8cff98;
+      font-weight: bold;
+    }
+
+    #status-offline {
+      color: #ff7474;
+      font-weight: bold;
+    }
+
+    #main-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    #telemetry-panel,
+    #system-panel,
+    #command-panel,
+    #history-panel {
+      border: 1px solid #287944;
+      background: #0c1214;
+      padding: 18px;
+      box-sizing: border-box;
+    }
+
+    #telemetry-title,
+    #system-title,
+    #command-title,
+    #history-title {
+      margin: 0 0 14px;
+      color: #b8ffc0;
+      font-size: 1rem;
+      letter-spacing: 1px;
+    }
+
+    #telemetry-list,
+    #system-list {
+      margin: 0;
+      line-height: 1.9;
+      overflow-wrap: anywhere;
+    }
+
+    #command-panel {
+      grid-column: 1 / -1;
+      text-align: center;
+    }
+
+    #command-description {
+      margin: 0 0 16px;
+      color: #72c887;
+      line-height: 1.5;
+    }
+
+    #command-current {
+      margin: 0 0 18px;
+      padding: 10px;
+      border: 1px dashed #287944;
+      color: #b8ffc0;
+    }
+
+    #command-forms {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    #form-auto,
+    #form-manual,
+    #form-fan-on,
+    #form-fan-off {
+      margin: 0;
+    }
+
+    #button-auto,
+    #button-manual,
+    #button-fan-on,
+    #button-fan-off {
+      min-width: 145px;
+      padding: 11px 16px;
+      border: 1px solid #36e36f;
+      font-family: "Courier New", Courier, monospace;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    #button-auto {
+      background: #36e36f;
+      color: #071009;
+    }
+
+    #button-manual {
+      background: #1d426f;
+      color: #d8ecff;
+      border-color: #5aa6ff;
+    }
+
+    #button-fan-on {
+      background: #8cff98;
+      color: #071009;
+    }
+
+    #button-fan-off {
+      background: transparent;
+      color: #ff8b8b;
+      border-color: #ff7474;
+    }
+
+    #button-auto:hover,
+    #button-manual:hover,
+    #button-fan-on:hover,
+    #button-fan-off:hover {
+      filter: brightness(1.15);
+    }
+
+    #history-panel {
+      margin-top: 16px;
+      overflow-x: auto;
+    }
+
+    #history-table {
+      width: 100%;
+      min-width: 920px;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+
+    #history-table th,
+    #history-table td {
+      padding: 9px 8px;
+      border: 1px solid #225f36;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    #history-table th {
+      color: #b8ffc0;
+      background: #10251a;
+    }
+
+    #history-table td {
+      color: #85d994;
+    }
+
+    #empty-history {
+      padding: 24px;
+      color: #5fbd78;
+    }
+
+    #footer {
+      margin-top: 18px;
+      padding: 14px;
+      color: #4f9862;
+      text-align: center;
+      font-size: 0.78rem;
+      border-top: 1px dashed #225f36;
+    }
+
+    @media (max-width: 760px) {
+      #page {
+        padding: 12px 8px;
+      }
+
+      #main-grid {
+        grid-template-columns: 1fr;
+      }
+
+      #command-panel {
+        grid-column: auto;
+      }
+
+      #button-auto,
+      #button-manual,
+      #button-fan-on,
+      #button-fan-off {
+        width: 100%;
+      }
+
+      #form-auto,
+      #form-manual,
+      #form-fan-on,
+      #form-fan-off {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body id="page">
+  <main id="dashboard">
+
+    <header id="header">
+      <h1 id="title">&gt; SUPREME_FAN_IOT_MONITOR</h1>
+
+      <p id="subtitle">
+        ESP32 telemetry over ESP-NOW, Flask gateway control and Supabase event history.
+      </p>
+
+      <div id="connection-line">
+        &gt; Device status:
+        {% if state.online %}
+          <span id="status-online">ONLINE</span>
+          {% if state.seconds_since_update is not none %}
+            — last packet {{ state.seconds_since_update }} seconds ago
+          {% endif %}
+        {% else %}
+          <span id="status-offline">OFFLINE</span>
+          {% if state.last_update %}
+            — last update: {{ state.last_update }}
+          {% else %}
+            — no telemetry received
+          {% endif %}
+        {% endif %}
+      </div>
+    </header>
+
+    <section id="main-grid">
+
+      <section id="telemetry-panel">
+        <h2 id="telemetry-title">&gt; SENSOR TELEMETRY</h2>
+
+        <p id="telemetry-list">
+          Temperature (C) :
+          {{ state.temperature_c if state.temperature_c is not none else "--" }} °C<br>
+
+          Temperature (F) :
+          {{ state.temperature_f if state.temperature_f is not none else "--" }} °F<br>
+
+          Humidity        :
+          {{ state.humidity if state.humidity is not none else "--" }} %<br>
+
+          Distance        :
+          {% if state.distance_cm is not none and state.distance_cm >= 0 %}
+            {{ state.distance_cm }} cm
+          {% else %}
+            --
+          {% endif %}<br>
+
+          ESP-NOW RSSI    :
+          {{ state.rssi if state.rssi is not none else "--" }} dBm<br>
+
+          Sensors valid   :
+          {{ "YES" if state.sensors_valid else "NO" }}
+        </p>
+      </section>
+
+      <section id="system-panel">
+        <h2 id="system-title">&gt; SYSTEM STATE</h2>
+
+        <p id="system-list">
+          Fan             :
+          {{ "ON" if state.fan_on else "OFF" }}<br>
+
+          Operation mode  :
+          {{ "MANUAL" if state.manual_mode else "AUTOMATIC" }}<br>
+
+          Alert           :
+          {{ "ACTIVE" if state.alert_active else "NORMAL" }}<br>
+
+          Packet sequence :
+          {{ state.sequence if state.sequence is not none else "--" }}<br>
+
+          ESP32 uptime    :
+          {% if state.uptime_ms is not none %}
+            {{ (state.uptime_ms / 1000) | round(1) }} s
+          {% else %}
+            --
+          {% endif %}<br>
+
+          Last update     :
+          {{ state.last_update if state.last_update else "--" }}
+        </p>
+      </section>
+
+      <section id="command-panel">
+        <h2 id="command-title">&gt; REMOTE CONTROL</h2>
+
+        <p id="command-description">
+          Commands are stored by Flask, read by the gateway and forwarded to the Supreme Fan through ESP-NOW.
+        </p>
+
+        <p id="command-current">
+          Last command:
+          <strong>{{ command.command }}</strong>
+          — ID {{ command.command_id }}
+          {% if command.updated_at %}
+            — {{ command.updated_at }}
+          {% endif %}
+        </p>
+
+        <div id="command-forms">
+
+          <form id="form-auto" action="{{ url_for('dashboard_command') }}" method="POST">
+            <input type="hidden" name="accion" value="auto">
+            <button id="button-auto" type="submit">AUTOMATIC MODE</button>
+          </form>
+
+          <form id="form-manual" action="{{ url_for('dashboard_command') }}" method="POST">
+            <input type="hidden" name="accion" value="manual">
+            <button id="button-manual" type="submit">MANUAL MODE</button>
+          </form>
+
+          <form id="form-fan-on" action="{{ url_for('dashboard_command') }}" method="POST">
+            <input type="hidden" name="accion" value="fan_on">
+            <button id="button-fan-on" type="submit">TURN FAN ON</button>
+          </form>
+
+          <form id="form-fan-off" action="{{ url_for('dashboard_command') }}" method="POST">
+            <input type="hidden" name="accion" value="fan_off">
+            <button id="button-fan-off" type="submit">TURN FAN OFF</button>
+          </form>
+
+        </div>
+      </section>
+
+    </section>
+
+    <section id="history-panel">
+      <h2 id="history-title">&gt; RECENT EVENT HISTORY</h2>
+
+      <table id="history-table">
+        <thead>
+          <tr>
+            <th>Date / Time</th>
+            <th>Sequence</th>
+            <th>Temp. C</th>
+            <th>Humidity</th>
+            <th>Distance</th>
+            <th>Fan</th>
+            <th>Mode</th>
+            <th>Alert</th>
+            <th>RSSI</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {% for event in history %}
+          <tr>
+            <td>{{ event.get("created_at", "--") }}</td>
+            <td>{{ event.get("sequence", "--") }}</td>
+            <td>
+              {% if event.get("temperature_c") is not none %}
+                {{ event.get("temperature_c") }} °C
+              {% else %}
+                --
+              {% endif %}
+            </td>
+            <td>
+              {% if event.get("humidity") is not none %}
+                {{ event.get("humidity") }} %
+              {% else %}
+                --
+              {% endif %}
+            </td>
+            <td>
+              {% if event.get("distance_cm") is not none and event.get("distance_cm") >= 0 %}
+                {{ event.get("distance_cm") }} cm
+              {% else %}
+                --
+              {% endif %}
+            </td>
+            <td>{{ "ON" if event.get("fan_on") else "OFF" }}</td>
+            <td>{{ "MANUAL" if event.get("manual_mode") else "AUTO" }}</td>
+            <td>{{ "ACTIVE" if event.get("alert_active") else "NORMAL" }}</td>
+            <td>
+              {% if event.get("rssi") is not none %}
+                {{ event.get("rssi") }} dBm
+              {% else %}
+                --
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td id="empty-history" colspan="9">
+              No telemetry events have been registered yet.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+</body>
+</html>
