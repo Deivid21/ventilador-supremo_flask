@@ -34,6 +34,7 @@
 #include <esp_wifi.h>
 #include <esp_arduino_version.h>
 #include <HTTPClient.h>
+#include <WiFiUdp.h>
 
 // -----------------------------------------------------------------------------
 // Wi-Fi and Flask configuration
@@ -41,6 +42,12 @@
 const char* WIFI_SSID = "Your WiFi SSID";
 const char* WIFI_PASSWORD = "Your WiFi Password";
 const char* FLASK_BASE_URL = "http://10.151.147.135:5000";
+
+// LabVIEW UDP configuration.
+// LABVIEW_IP is the computer running the LabVIEW VI.
+const char* LABVIEW_IP = "10.151.147.12";
+constexpr uint16_t LABVIEW_TELEMETRY_PORT = 5000;
+constexpr uint16_t LABVIEW_COMMAND_PORT = 5001;
 
 // -----------------------------------------------------------------------------
 // Hardware and timing
@@ -55,6 +62,7 @@ constexpr int ALERT_DISTANCE_MAX_CM = 10;
 
 constexpr unsigned long DATA_POST_INTERVAL_MS = 3000;
 constexpr unsigned long COMMAND_POLL_INTERVAL_MS = 2000;
+constexpr unsigned long LABVIEW_TELEMETRY_INTERVAL_MS = 1000;
 constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
 constexpr unsigned long TELEMETRY_STALE_MS = 7000;
 constexpr uint16_t HTTP_TIMEOUT_MS = 2500;
@@ -140,14 +148,28 @@ int8_t latestRssi = 0;
 unsigned long lastTelemetryReceivedMs = 0;
 unsigned long lastDataPostMs = 0;
 unsigned long lastCommandPollMs = 0;
+unsigned long lastLabViewTelemetryMs = 0;
 unsigned long lastWiFiAttemptMs = 0;
 
-uint32_t lastForwardedCommandId = 0;
+uint32_t lastFlaskCommandId = 0;
+uint32_t espNowCommandSequence = 0;
 uint8_t lastReportedChannel = 0;
 bool previousWiFiConnected = false;
 bool espNowReady = false;
+bool udpReady = false;
+bool pendingLabViewCommandAvailable = false;
+RemoteCommand pendingLabViewCommand = RemoteCommand::None;
+
+WiFiUDP labViewTelemetryUdp;
+WiFiUDP labViewCommandUdp;
+IPAddress labViewIpAddress;
 
 portMUX_TYPE telemetryMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Forward declarations for UDP services used by the Wi-Fi state machine.
+void startLabViewUdp();
+void stopLabViewUdp();
+void processPendingLabViewCommand();
 
 // -----------------------------------------------------------------------------
 // Utilities
@@ -423,6 +445,7 @@ void maintainWiFi() {
     if (!previousWiFiConnected) {
       Serial.print("[Wi-Fi] Connected. IP: ");
       Serial.println(WiFi.localIP());
+      startLabViewUdp();
     }
 
     if (currentChannel != lastReportedChannel) {
@@ -441,6 +464,7 @@ void maintainWiFi() {
   if (previousWiFiConnected) {
     Serial.println("[Wi-Fi] Connection lost");
     previousWiFiConnected = false;
+    stopLabViewUdp();
   }
 
   if (millis() - lastWiFiAttemptMs >= WIFI_RETRY_INTERVAL_MS) {
@@ -449,6 +473,126 @@ void maintainWiFi() {
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     lastWiFiAttemptMs = millis();
   }
+}
+
+// -----------------------------------------------------------------------------
+// LabVIEW UDP integration
+// -----------------------------------------------------------------------------
+void stopLabViewUdp() {
+  labViewTelemetryUdp.stop();
+  labViewCommandUdp.stop();
+  udpReady = false;
+}
+
+void startLabViewUdp() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  if (!labViewIpAddress.fromString(LABVIEW_IP)) {
+    Serial.println("[LabVIEW] Invalid LABVIEW_IP");
+    udpReady = false;
+    return;
+  }
+
+  stopLabViewUdp();
+
+  const bool telemetrySocketReady =
+    labViewTelemetryUdp.begin(LABVIEW_TELEMETRY_PORT) == 1;
+  const bool commandSocketReady =
+    labViewCommandUdp.begin(LABVIEW_COMMAND_PORT) == 1;
+
+  udpReady = telemetrySocketReady && commandSocketReady;
+
+  if (udpReady) {
+    Serial.printf(
+      "[LabVIEW] UDP ready | TX %s:%u | RX 0.0.0.0:%u\n",
+      LABVIEW_IP,
+      LABVIEW_TELEMETRY_PORT,
+      LABVIEW_COMMAND_PORT
+    );
+  } else {
+    Serial.println("[LabVIEW] Could not start UDP sockets");
+  }
+}
+
+void sendTelemetryToLabView() {
+  if (
+    !udpReady ||
+    WiFi.status() != WL_CONNECTED ||
+    !telemetryAvailable ||
+    telemetryIsStale()
+  ) {
+    return;
+  }
+
+  // Original LabVIEW-compatible format:
+  // temperatureC;temperatureF;humidity;fanState
+  char message[128];
+  snprintf(
+    message,
+    sizeof(message),
+    "%.1f;%.1f;%.1f;%u",
+    latestTelemetry.temperatureC,
+    latestTelemetry.temperatureF,
+    latestTelemetry.humidity,
+    latestTelemetry.fanOn ? 1U : 0U
+  );
+
+  if (!labViewTelemetryUdp.beginPacket(
+        labViewIpAddress,
+        LABVIEW_TELEMETRY_PORT
+      )) {
+    Serial.println("[LabVIEW] UDP beginPacket failed");
+    return;
+  }
+
+  labViewTelemetryUdp.write(
+    reinterpret_cast<const uint8_t*>(message),
+    strlen(message)
+  );
+
+  const int result = labViewTelemetryUdp.endPacket();
+
+  if (result == 1) {
+    Serial.print("[LabVIEW TX] ");
+    Serial.println(message);
+  } else {
+    Serial.println("[LabVIEW] UDP telemetry send failed");
+  }
+}
+
+RemoteCommand parseLabViewCommand(String commandText) {
+  commandText.trim();
+  commandText.toUpperCase();
+
+  if (commandText == "MANUAL") {
+    return RemoteCommand::SetManual;
+  }
+
+  if (commandText == "AUTO") {
+    return RemoteCommand::SetAuto;
+  }
+
+  if (commandText == "FAN:ON" || commandText == "FAN_ON") {
+    return RemoteCommand::FanOn;
+  }
+
+  if (commandText == "FAN:OFF" || commandText == "FAN_OFF") {
+    return RemoteCommand::FanOff;
+  }
+
+  return RemoteCommand::None;
+}
+
+uint32_t nextEspNowCommandId() {
+  espNowCommandSequence++;
+
+  if (espNowCommandSequence == 0) {
+    espNowCommandSequence = 1;
+  }
+
+  return espNowCommandSequence;
 }
 
 // -----------------------------------------------------------------------------
@@ -549,9 +693,12 @@ RemoteCommand parseCommand(const String& response) {
   return RemoteCommand::None;
 }
 
-bool sendCommandToFan(RemoteCommand command, uint32_t commandId) {
+bool sendCommandToFan(RemoteCommand command, const char* source) {
   if (!espNowReady || !fanNodeKnown || !fanNodePeerReady) {
-    Serial.println("[ESP-NOW] Command not sent: fan node is not linked");
+    Serial.printf(
+      "[ESP-NOW] %s command not sent: fan node is not linked\n",
+      source
+    );
     return false;
   }
 
@@ -560,7 +707,7 @@ bool sendCommandToFan(RemoteCommand command, uint32_t commandId) {
   packet.version = PACKET_VERSION;
   packet.type = static_cast<uint8_t>(PacketType::Command);
   packet.command = static_cast<uint8_t>(command);
-  packet.commandId = commandId;
+  packet.commandId = nextEspNowCommandId();
 
   const esp_err_t result = esp_now_send(
     fanNodeMac,
@@ -570,15 +717,72 @@ bool sendCommandToFan(RemoteCommand command, uint32_t commandId) {
 
   if (result == ESP_OK) {
     Serial.printf(
-      "[ESP-NOW TX] Command: %u | ID: %lu\n",
+      "[ESP-NOW TX] Source: %s | Command: %u | Gateway ID: %lu\n",
+      source,
       static_cast<unsigned int>(packet.command),
       static_cast<unsigned long>(packet.commandId)
     );
     return true;
   }
 
-  Serial.printf("[ESP-NOW TX] Command queue error: %d\n", result);
+  Serial.printf(
+    "[ESP-NOW TX] %s command queue error: %d\n",
+    source,
+    result
+  );
   return false;
+}
+
+void checkLabViewCommands() {
+  if (!udpReady || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  const int packetSize = labViewCommandUdp.parsePacket();
+  if (packetSize <= 0) {
+    return;
+  }
+
+  char buffer[64] = {};
+  const int bytesRead = labViewCommandUdp.read(
+    buffer,
+    sizeof(buffer) - 1
+  );
+
+  if (bytesRead <= 0) {
+    return;
+  }
+
+  buffer[bytesRead] = '\0';
+  String commandText(buffer);
+  commandText.trim();
+
+  Serial.print("[LabVIEW RX] ");
+  Serial.println(commandText);
+
+  const RemoteCommand command = parseLabViewCommand(commandText);
+
+  if (command == RemoteCommand::None) {
+    Serial.println("[LabVIEW] Unsupported command");
+    return;
+  }
+
+  if (!sendCommandToFan(command, "LabVIEW")) {
+    pendingLabViewCommand = command;
+    pendingLabViewCommandAvailable = true;
+    Serial.println("[LabVIEW] Command queued until ESP-NOW link is ready");
+  }
+}
+
+void processPendingLabViewCommand() {
+  if (!pendingLabViewCommandAvailable) {
+    return;
+  }
+
+  if (sendCommandToFan(pendingLabViewCommand, "LabVIEW retry")) {
+    pendingLabViewCommand = RemoteCommand::None;
+    pendingLabViewCommandAvailable = false;
+  }
 }
 
 void pollCommandFromFlask() {
@@ -611,16 +815,10 @@ void pollCommandFromFlask() {
     if (
       command != RemoteCommand::None &&
       parsedCommandId > 0 &&
-      static_cast<uint32_t>(parsedCommandId) > lastForwardedCommandId
+      static_cast<uint32_t>(parsedCommandId) > lastFlaskCommandId
     ) {
-      if (
-        sendCommandToFan(
-          command,
-          static_cast<uint32_t>(parsedCommandId)
-        )
-      ) {
-        lastForwardedCommandId =
-          static_cast<uint32_t>(parsedCommandId);
+      if (sendCommandToFan(command, "Flask")) {
+        lastFlaskCommandId = static_cast<uint32_t>(parsedCommandId);
       }
     }
   } else if (statusCode > 0) {
@@ -641,6 +839,11 @@ void pollCommandFromFlask() {
 void setup() {
   Serial.begin(115200);
   delay(500);
+
+  espNowCommandSequence = esp_random();
+  if (espNowCommandSequence == 0) {
+    espNowCommandSequence = 1;
+  }
 
   pinMode(GREEN_LED_PIN, OUTPUT);
   pinMode(RED_LED_PIN, OUTPUT);
@@ -672,6 +875,15 @@ void loop() {
 
   processNewTelemetry();
   updateStatusLeds();
+  processPendingLabViewCommand();
+  checkLabViewCommands();
+
+  if (
+    now - lastLabViewTelemetryMs >= LABVIEW_TELEMETRY_INTERVAL_MS
+  ) {
+    lastLabViewTelemetryMs = now;
+    sendTelemetryToLabView();
+  }
 
   if (now - lastDataPostMs >= DATA_POST_INTERVAL_MS) {
     lastDataPostMs = now;

@@ -656,7 +656,7 @@ void applyPendingCommand() {
   gatewayLinked = true;
   lastGatewayContactMs = millis();
 
-  if (commandId != 0 && commandId <= lastAppliedCommandId) {
+  if (commandId != 0 && commandId == lastAppliedCommandId) {
     return;
   }
 
